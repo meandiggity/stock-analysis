@@ -82,13 +82,21 @@ class Brand(Market):
         return self._code
 
     # 名前
-    def get_company_name(self):
+    def get_company_name(self,lang='en'):
         brand = self.get_info()
-        return brand['CompanyName']
+        if lang == 'jp':
+            return brand['CompanyName']
+        else:
+            return brand['CompanyNameEnglish']
+
+    # 33セクター分類
+    def get_sector33(self):
+        brand = self.get_info()
+        return brand['Sector33Code']
 
     def get_info(self):
         brands = super().get_brands()
-        index = brands[brands['Code'] == self._code].index
+        index = brands[brands['Code'] == str(self._code)].index
         return brands.iloc[index].iloc[-1].to_dict()
 
     # チャート
@@ -101,22 +109,52 @@ class Brand(Market):
             )
             df['Timestamp'] = pandas.to_datetime(df['Date'])
             self._price = df
-        return self._price
+        return self._price.copy()
     
     # graph
     def make_graph(self,path:str='./graph.png'):
         df = self.get_prices()[["Timestamp","Open","High","Low","Close","Volume"]]
+        df.reset_index(inplace=True, drop=True)
         df.set_index('Timestamp', inplace = True)
-        mpf.plot(df[-100:], type='candle',
+        df,add_df = self._add_plot(df)
+        mpf.plot(df, type='candle',
             figratio=(5,4),volume=True,
-            mav=(5, 25), style='yahoo',
+            mav=(3, 12), style='yahoo',
+            title=self.get_company_name(),
+            addplot=add_df,
             savefig=path
         )
+
+    #addplot
+    def _add_plot(self,chart_df:pandas.DataFrame, type='PER'):
+        df = self.get_fins_statements()
+        if type == 'PER':
+            df['Timestamp'] = pandas.to_datetime(df['DisclosedDate'])
+            # 一株当たりの純利益の当期予想を残期間によって算出
+            df['ForecastTotalEarningsPerShare'] = df['EarningsPerShare']/((df['CurrentPeriodEndDate']-df['CurrentPeriodStartDate'])/(df['CurrentFiscalYearEndDate']-df['CurrentFiscalYearStartDate']))
+            df['EarningsPerShareX16'] = df['ForecastTotalEarningsPerShare'].apply(lambda x: x * 16)
+            df['EarningsPerShareX15'] = df['ForecastTotalEarningsPerShare'].apply(lambda x: x * 15)
+            df['EarningsPerShareX14'] = df['ForecastTotalEarningsPerShare'].apply(lambda x: x * 14)
+            df = df.loc[:,['Timestamp','ForecastTotalEarningsPerShare','EarningsPerShareX16','EarningsPerShareX15','EarningsPerShareX14']]
+            df.reset_index(inplace=True, drop=True)
+            df.set_index('Timestamp', inplace = True)
+            print(chart_df)
+            print(df)
+
+            #chartとmergeする
+            df = pandas.concat([chart_df,df],axis=1)
+            df['EarningsPerShareX16'] = df['EarningsPerShareX16'].bfill()
+            df['EarningsPerShareX15'] = df['EarningsPerShareX15'].bfill()
+            df['EarningsPerShareX14'] = df['EarningsPerShareX14'].bfill()
+            adp = [
+                mpf.make_addplot(df[["EarningsPerShareX16", "EarningsPerShareX15", "EarningsPerShareX14"]], type='line',panel=0)
+            ]
+        return df,adp
 
     # 決算情報
     #一株当たりの純利益
     def get_EarningsPerShare(self):
-        return self.get_fins_statements().loc[:,['CurrentPeriodEndDate','EarningsPerShare']]
+        return self.get_fins_statements().loc[:,['CurrentPeriodEndDate','EarningsPerShare']].copy()
 
     def get_fins_statements(self):
         if not hasattr(self,'_fins_statements'):
@@ -152,8 +190,10 @@ class Brand(Market):
                         ,'NextYearForecastNonConsolidatedOperatingProfit','NextYearForecastNonConsolidatedOrdinaryProfit','NextYearForecastNonConsolidatedProfit'
                         ,'NextYearForecastNonConsolidatedEarningsPerShare']:
                 df[column] = pandas.to_numeric(df[column], errors="coerce")
+            for column in ['CurrentPeriodStartDate','CurrentPeriodEndDate','CurrentFiscalYearStartDate','CurrentFiscalYearEndDate']:
+                df[column] = pandas.to_datetime(df[column])
             self._fins_statements = df
-        return self._fins_statements
+        return self._fins_statements.copy()
 
     def _get_yyyymmdd(self,date:datetime.date):
         return f'{date.year:04}{date.month:02}{date.day:02}'
