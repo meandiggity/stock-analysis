@@ -112,30 +112,32 @@ class Brand(Market):
         return self._price.copy()
     
     # graph
-    def make_graph(self,path:str='./graph.png'):
+    def make_graph(self,path:str='./graph.png',plot:str='ROE'):
         df = self.get_prices()[["Timestamp","Open","High","Low","Close","Volume"]]
         df.reset_index(inplace=True, drop=True)
         df.set_index('Timestamp', inplace = True)
-        df,add_df = self._add_plot(df)
+        df,add_df = self._add_plot(df,plot=plot)
         mpf.plot(df, type='candle',
             figratio=(5,4),volume=True,
             mav=(3, 12), style='yahoo',
-            title=self.get_company_name(),
+            title=f'{self.get_company_name()} over {plot}',
+            datetime_format='%Y/%m/%d',
             addplot=add_df,
             savefig=path
         )
 
     #addplot
-    def _add_plot(self,chart_df:pandas.DataFrame, type='PER'):
+    def _add_plot(self,chart_df:pandas.DataFrame, plot:str):
         df = self.get_fins_statements()
-        if type == 'PER':
+        #PER14,15,16倍線
+        if plot == 'PER':
             df['Timestamp'] = pandas.to_datetime(df['DisclosedDate'])
             # 一株当たりの純利益の当期予想を残期間によって算出
             df['ForecastTotalEarningsPerShare'] = df['EarningsPerShare']/((df['CurrentPeriodEndDate']-df['CurrentPeriodStartDate'])/(df['CurrentFiscalYearEndDate']-df['CurrentFiscalYearStartDate']))
             df['EarningsPerShareX16'] = df['ForecastTotalEarningsPerShare'].apply(lambda x: x * 16)
             df['EarningsPerShareX15'] = df['ForecastTotalEarningsPerShare'].apply(lambda x: x * 15)
             df['EarningsPerShareX14'] = df['ForecastTotalEarningsPerShare'].apply(lambda x: x * 14)
-            df = df.loc[:,['Timestamp','ForecastTotalEarningsPerShare','EarningsPerShareX16','EarningsPerShareX15','EarningsPerShareX14']]
+            df = df.loc[:,['Timestamp','EarningsPerShare','ForecastTotalEarningsPerShare','EarningsPerShareX16','EarningsPerShareX15','EarningsPerShareX14']]
             df.reset_index(inplace=True, drop=True)
             df.set_index('Timestamp', inplace = True)
             print(chart_df)
@@ -148,6 +150,56 @@ class Brand(Market):
             df['EarningsPerShareX14'] = df['EarningsPerShareX14'].bfill()
             adp = [
                 mpf.make_addplot(df[["EarningsPerShareX16", "EarningsPerShareX15", "EarningsPerShareX14"]], type='line',panel=0)
+            ]
+        #平均PERから割安/割高分岐線を描画
+        elif plot =='averagePER':
+            df['Timestamp'] = pandas.to_datetime(df['DisclosedDate'])
+            df.set_index('Timestamp', inplace = True)
+            # 一株当たりの純利益/四半期
+            df['QuotaPeriod'] = ((df['CurrentPeriodEndDate']-df['CurrentPeriodStartDate'])/(df['CurrentFiscalYearEndDate']-df['CurrentFiscalYearStartDate']))*4
+            df['EarningsPerSharePerYear'] = df['EarningsPerShare'].where(df['QuotaPeriod']==4,numpy.nan)
+            df.at[df.index[-1], 'EarningsPerSharePerYear'] = df.at[df.index[-1],'EarningsPerShare']*4/df.at[df.index[-1],'QuotaPeriod']
+            print(df.at[df.index[-1],'EarningsPerShare'])
+            print(df.at[df.index[-1],'EarningsPerShare']*4/df.at[df.index[-1],'QuotaPeriod'])
+            print(df.loc[:,['QuotaPeriod','EarningsPerShare','EarningsPerSharePerYear']] )
+
+            #chartとmergeする
+            df = pandas.concat([chart_df,df],axis=1)
+            df['EarningsPerSharePerYear'] = df['EarningsPerSharePerYear'].bfill()
+
+            #平均PERを求める
+            df['PER'] = df['Close']/df['EarningsPerSharePerYear']
+            AveragePER = df['PER'].mean()
+
+            #平均PERとEPSを掛けて、割安/割高分岐線を描く
+            df['Break-evenPoint'] = AveragePER*df['EarningsPerSharePerYear']
+            print(df.columns)
+            print(df)
+            adp = [
+                mpf.make_addplot(df[["Break-evenPoint"]], type='line',panel=0)
+            ]
+        elif plot == "ROE":
+            df['Timestamp'] = pandas.to_datetime(df['DisclosedDate'])
+            df.set_index('Timestamp', inplace = True)
+            #予想純利益
+            df['ForecastTotalProfit'] = df['Profit']/((df['CurrentPeriodEndDate']-df['CurrentPeriodStartDate'])/(df['CurrentFiscalYearEndDate']-df['CurrentFiscalYearStartDate']))
+            #自己資本
+            df["EquityToAsset"] = df['Equity']*df["EquityToAssetRatio"]
+            df["ROE"] = df['ForecastTotalProfit']/df["EquityToAsset"]
+            print(df.loc[:,["ROE","Profit","ForecastTotalProfit","Equity","EquityToAssetRatio"]])
+
+            #chartとmergeする
+            df = pandas.concat([chart_df,df],axis=1)
+            df['ROE'] = df['ROE'].bfill()
+
+            #価格*ROE比率
+            df["ROEratio"] = df["Close"]*df["ROE"]
+            #過去平均ROE倍率
+            averageROEratio = df["ROEratio"].mean()
+            #割安割高ライン
+            df['Break-evenPoint'] = averageROEratio/df["ROE"]
+            adp = [
+                mpf.make_addplot(df[["Break-evenPoint"]], type='line',panel=0)
             ]
         return df,adp
 
