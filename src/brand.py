@@ -4,6 +4,7 @@ import jquantsapi
 import pandas
 import numpy
 import mplfinance as mpf
+import matplotlib
 
 class Market:
     def __init__(self):
@@ -16,7 +17,53 @@ class Market:
         if not hasattr(self,'_brands'):
             self._brands = self.cli().get_listed_info()
         return self._brands
-    
+
+
+    def _get_all_brands(self):
+        all_brands = self.get_brands()
+        #category_brands = all_brands[all_brands['MarketCode'].isin(['0112']) & all_brands['Code'].isin(['22260','48160'])]
+        category_brands = all_brands[all_brands['MarketCode'].isin(['0111'])]
+        #category_brands = all_brands[all_brands['MarketCode'].isin(['0111','0112','0113'])]
+        brands = []
+        for brand_code in category_brands.loc[:,"Code"].to_list():
+            brands.append(Brand(brand_code))
+        return brands
+
+    def _get_latest_datas(self,brand):
+            return brand.get_latests_data()
+
+    def get_all_latest_datas(self):
+        dfs = []
+        from concurrent import futures
+        with futures.ProcessPoolExecutor() as executor:
+            dfs = list(
+                executor.map(self._get_latest_datas, self._get_all_brands())
+            )
+        df = pandas.DataFrame()
+        df = pandas.concat(dfs,axis=0)
+        df.reset_index(inplace=True, drop=True)
+        return df
+
+    def make_scatter_roe_pbr(self):
+        df = self.get_all_latest_datas()
+        #予想純利益
+        df['ForecastTotalProfit'] = df['Profit']/((df['CurrentPeriodEndDate']-df['CurrentPeriodStartDate'])/(df['CurrentFiscalYearEndDate']-df['CurrentFiscalYearStartDate']))
+        #自己資本
+        df["EquityToAsset"] = df['Equity']*df["EquityToAssetRatio"]
+
+        df["ROE"] = df['ForecastTotalProfit']/df["EquityToAsset"]
+        df["PBR"] = df["Close"]/df["BookValuePerShare"]
+        matplotlib.pyplot.scatter(df["ROE"],df["PBR"])
+        #x軸
+        matplotlib.pyplot.xlabel("ROE")
+        matplotlib.pyplot.xlim(0, 0.4)
+        #y軸
+        matplotlib.pyplot.ylabel("PBR")
+        matplotlib.pyplot.ylim(0, 4)
+        matplotlib.pyplot.grid(True)
+        matplotlib.pyplot.savefig("ROEvPBR.png")
+        return df
+
     ##水産・農林業 0050
     ##鉱業 1050
     ##建設業 2050
@@ -64,17 +111,27 @@ class Sector33():
         category_brands = all_brands[all_brands['Sector33Code'] == f'{self._code}']
         brands = []
         for brand_code in category_brands.loc[:,"Code"].to_list():
-            brands.append = Brand(brand_code)
+            brands.append(Brand(brand_code))
         return brands
 
 class Brand(Market):
-    def __init__(self,code):
+    def __init__(self,code,plan='free'):
         super().__init__()
         self._code = code
-        # free planは12週間前〜2年12週間前までしか取れない。
-        # https://jpx.gitbook.io/j-quants-ja/outline/data-spec
-        self._end = datetime.datetime.now(tz=tz.gettz('Asia/Tokyo')).date()-datetime.timedelta(weeks=12)
-        self._start = datetime.date(year=self._end.year-2,month=self._end.month,day=self._end.day)
+        if plan == 'light':
+            self._end = datetime.datetime.now(tz=tz.gettz('Asia/Tokyo')).date()
+            self._start = datetime.date(year=self._end.year-5,month=self._end.month,day=self._end.day)
+        elif plan == 'standard':
+            self._end = datetime.datetime.now(tz=tz.gettz('Asia/Tokyo')).date()
+            self._start = datetime.date(year=self._end.year-10,month=self._end.month,day=self._end.day)
+        elif plan == 'premium':
+            self._end = datetime.datetime.now(tz=tz.gettz('Asia/Tokyo')).date()
+            self._start = datetime.date(year=1900,month=1,day=1)
+        else:
+            # free planは12週間前〜2年12週間前までしか取れない。
+            # https://jpx.gitbook.io/j-quants-ja/outline/data-spec
+            self._end = datetime.datetime.now(tz=tz.gettz('Asia/Tokyo')).date()-datetime.timedelta(weeks=12)
+            self._start = datetime.date(year=self._end.year-2,month=self._end.month,day=self._end.day)
 
     # 企業情報
     # code
@@ -100,17 +157,21 @@ class Brand(Market):
         return brands.iloc[index].iloc[-1].to_dict()
 
     # チャート
-    def get_prices(self):
+    def get_prices(self,start=None,end=None):
         if not hasattr(self,'_price'):
             df = super().cli().get_prices_daily_quotes(
                 code=self._code,
-                from_yyyymmdd = self._get_yyyymmdd(self._start),
-                to_yyyymmdd = self._get_yyyymmdd(self._end)
+                from_yyyymmdd = self._get_yyyymmdd(start if start is not None else self._start),
+                to_yyyymmdd = self._get_yyyymmdd(end if end is not None else self._end)
             )
             df['Timestamp'] = pandas.to_datetime(df['Date'])
             self._price = df
         return self._price.copy()
     
+    def get_latest_prices(self):
+        start = self._end-datetime.timedelta(weeks=1)
+        return self.get_prices(start=start).tail(1).reset_index(drop=True)
+
     # graph
     def make_graph(self,path:str='./graph.png',plot:str='ROE'):
         df = self.get_prices()[["Timestamp","Open","High","Low","Close","Volume"]]
@@ -246,6 +307,26 @@ class Brand(Market):
                 df[column] = pandas.to_datetime(df[column])
             self._fins_statements = df
         return self._fins_statements.copy()
+
+    def get_latest_fins_statements(self):
+        df = self.get_fins_statements()
+        return df[df['TypeOfCurrentPeriod'] == 'FY'].tail(1).reset_index(drop=True)
+
+    def get_latests_data(self):
+        df_fs = self.get_latest_fins_statements()
+        if len(df_fs) == 0:
+            df_price = self.get_latest_prices()
+        else:
+            #発表日の翌営業日の取引記録
+            start = df_fs.at[df_fs.index[0],"DisclosedDate"]
+            end = start + datetime.timedelta(weeks=1)
+            try:
+                df_price = self.get_prices(start=start,end=end).head(2).tail(1).reset_index(drop=True)
+            except:
+                df_price = self.get_latest_prices()
+        df = pandas.concat([df_fs,df_price],axis=1)
+        df['Code'] = self.get_code()
+        return df
 
     def _get_yyyymmdd(self,date:datetime.date):
         return f'{date.year:04}{date.month:02}{date.day:02}'
